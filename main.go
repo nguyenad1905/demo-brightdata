@@ -1,213 +1,165 @@
-// Tên tệp: main.go
+// Tên tệp: browser.go
+// Giải pháp này sử dụng Bright Data Scraping Browser (tăng timeout cho Fill)
 package main
 
 import (
-	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
-	"math/rand"
-	"net/http"
-	"net/http/cookiejar"
-	"net/url"
 	"os"
 	"strings"
-	"time"
+	"time" // Thêm thư viện time để dùng Sleep
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/joho/godotenv"
+	"github.com/playwright-community/playwright-go"
 )
 
-// createSessionID tạo một ID ngẫu nhiên (10 ký tự)
-// Việc này ra lệnh cho Web Unlocker sử dụng cùng một IP (IP cố định) cho tất cả các yêu cầu
-func createSessionID() string {
-	rand.Seed(time.Now().UnixNano())
-	chars := []rune("abcdefghijklmnopqrstuvwxyz0123456789")
-	b := make([]rune, 10)
-	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))]
-	}
-	return string(b)
-}
-
 func main() {
-	log.Println("--- Bắt đầu quy trình đăng nhập không trình duyệt ---")
+	log.Println("--- Bắt đầu quy trình đăng nhập bằng Scraping Browser ---")
 
-	// --- 1. TẢI BIẾN MÔI TRƯỜNG TỪ TỆP .ENV ---
+	// --- 1. TẢI BIẾN MÔI TRƯỜNG ---
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Không tìm thấy tệp .env, đang sử dụng biến môi trường hệ thống.")
 	}
 
-	// --- 2. LẤY THÔNG TIN XÁC THỰC TỪ ENV ---
 	CUSTOMER_ID := os.Getenv("BRD_CUSTOMER_ID")
 	PROXY_PASSWORD := os.Getenv("BRD_PASSWORD")
-	ZONE_NAME := os.Getenv("BRD_ZONE_NAME")
-	PROXY_PORT := os.Getenv("BRD_PROXY_PORT")
+	ZONE_NAME := os.Getenv("BRD_SB_ZONE_NAME") // Zone của Scraping Browser
+	SB_PORT := os.Getenv("BRD_SB_PORT")        // Cổng của Scraping Browser (ví dụ: 9222)
 	MY_USERNAME := os.Getenv("APP_USERNAME")
 	MY_PASSWORD := os.Getenv("APP_PASSWORD")
 
-	// Kiểm tra xem tất cả các biến đã được đặt chưa
-	if CUSTOMER_ID == "" || PROXY_PASSWORD == "" || MY_USERNAME == "" || MY_PASSWORD == "" || ZONE_NAME == "" || PROXY_PORT == "" {
-		log.Fatal("Lỗi: Một trong các biến môi trường (BRD_CUSTOMER_ID, BRD_PASSWORD, BRD_ZONE_NAME, BRD_PROXY_PORT, APP_USERNAME, APP_PASSWORD) chưa được đặt.")
+	// Kiểm tra các biến quan trọng cho mã này
+	if CUSTOMER_ID == "" || PROXY_PASSWORD == "" || ZONE_NAME == "" || SB_PORT == "" || MY_USERNAME == "" || MY_PASSWORD == "" {
+		log.Fatal("Lỗi: Một trong các biến môi trường (BRD_CUSTOMER_ID, BRD_PASSWORD, BRD_SB_ZONE_NAME, BRD_SB_PORT, APP_USERNAME, APP_PASSWORD) chưa được đặt.")
 	}
 
-	// --- 3. TẠO HTTP CLIENT (PHIÊN LÀM VIỆC) ---
+	// --- 2. KẾT NỐI VỚI SCRAPING BROWSER CỦA BRIGHT DATA ---
 
-	// Jar vẫn cần thiết để TỰ ĐỘNG nhận và lưu cookie từ Bước 5 (POST)
-	jar, err := cookiejar.New(nil)
+	// Xây dựng URL điểm cuối (endpoint) WebSocket (wss)
+	endpointURL := fmt.Sprintf("wss://%s-zone-%s:%s@brd.superproxy.io:%s", CUSTOMER_ID, ZONE_NAME, PROXY_PASSWORD, SB_PORT)
+
+	log.Println("Đang kết nối với:", fmt.Sprintf("wss://%s-zone-%s:***PASSWORD***@brd.superproxy.io:%s", CUSTOMER_ID, ZONE_NAME, SB_PORT))
+
+	pw, err := playwright.Run()
 	if err != nil {
-		log.Fatalf("Lỗi khi tạo cookie jar: %v", err)
+		log.Fatalf("Không thể khởi động Playwright: %v", err)
 	}
+	defer pw.Stop()
 
-	sessionID := createSessionID()
-	log.Printf("Đang sử dụng Session ID cho IP cố định: %s\n", sessionID)
-
-	// Xây dựng chuỗi username, bao gồm cả session cố định và quốc gia
-	proxyUser := fmt.Sprintf("%s-zone-%s-session-%s-brd-country-us", CUSTOMER_ID, ZONE_NAME, sessionID)
-	proxyHost := "brd.superproxy.io"
-
-	// Sử dụng PROXY_PORT từ .env
-	proxyString := fmt.Sprintf("http://%s:%s@%s:%s", proxyUser, PROXY_PASSWORD, proxyHost, PROXY_PORT)
-
-	proxyURL, err := url.Parse(proxyString)
+	// Kết nối với trình duyệt từ xa của Bright Data
+	browser, err := pw.Chromium.ConnectOverCDP(endpointURL, playwright.BrowserTypeConnectOverCDPOptions{
+		Timeout: playwright.Float(120000), // Tăng thời gian chờ kết nối lên 2 phút
+	})
 	if err != nil {
-		log.Fatalf("Lỗi khi phân tích URL proxy: %v", err)
+		log.Fatalf("Không thể kết nối với Scraping Browser: %v", err)
 	}
+	defer browser.Close()
 
-	// Cấu hình Transport để dùng proxy và bỏ qua xác minh SSL
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+	log.Println("Đã kết nối! Đang tạo bối cảnh (context)...")
+	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
+		UserAgent: playwright.String("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"),
+		Viewport: &playwright.Size{
+			Width:  1920,
+			Height: 1080,
 		},
+	})
+	if err != nil {
+		log.Fatalf("Không thể tạo bối cảnh: %v", err)
 	}
 
-	// Tạo Client (phiên làm việc) cuối cùng
-	client := &http.Client{
-		Transport: transport,
-		Jar:       jar,               // Dùng để TỰ ĐỘNG LƯU cookie
-		Timeout:   120 * time.Second, // Đặt thời gian chờ 2 phút
+	page, err := context.NewPage()
+	if err != nil {
+		log.Fatalf("Không thể tạo trang: %v", err)
 	}
 
-	// --- 4. BƯỚC 1: GET ĐỂ LẤY TOKEN ---
+	// --- 3. THỰC HIỆN ĐĂNG NHẬP (Mã Playwright đơn giản) ---
 	loginURL := "https://www.ha.com/c/login.zx"
-	log.Printf("Đang gửi GET tới %s (Web Unlocker sẽ giải CAPTCHA)...\n", loginURL)
 
-	responseGet, err := client.Get(loginURL)
-	if err != nil {
-		log.Fatalf("Lỗi khi gửi yêu cầu GET: %v", err)
-	}
-	defer responseGet.Body.Close()
-
-	if responseGet.StatusCode != 200 {
-		log.Fatalf("Yêu cầu GET thất bại, trạng thái: %s", responseGet.Status)
+	// BƯỚC 1: Tải trang.
+	log.Printf("Đang tải trang %s (Scraping Browser sẽ giải CAPTCHA)...\n", loginURL)
+	if _, err := page.Goto(loginURL, playwright.PageGotoOptions{Timeout: playwright.Float(120000)}); err != nil {
+		log.Fatalf("Lỗi khi tải trang login: %v", err)
 	}
 
-	// --- 5. BƯỚC 2: PHÂN TÍCH TOKEN ---
-	log.Println("Đang phân tích HTML để tìm 'formToken'...")
+	// Thêm độ trễ để Scraping Browser có thời gian xử lý CAPTCHA (nếu cần)
+	log.Println("Chờ 5 giây để Scraping Browser xử lý (nếu có)...")
+	time.Sleep(5 * time.Second)
 
-	doc, err := goquery.NewDocumentFromReader(responseGet.Body)
-	if err != nil {
-		log.Fatalf("Lỗi khi phân tích HTML: %v", err)
+	// Chụp ảnh màn hình để xem trang đã tải như thế nào
+	log.Println("Trang đã tải, đang chụp ảnh màn hình trước khi điền...")
+	if _, err := page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_login_page.png"), FullPage: playwright.Bool(true)}); err != nil {
+		log.Printf("Không thể chụp ảnh màn hình: %v", err)
+	}
+	log.Println("Đã lưu ảnh chụp màn hình vào 'debug_login_page.png'")
+
+	// === Selector (Giả định selector password là 'input#password') ===
+	usernameSelector := "input[name='username']"
+	passwordSelector := "input#password" // Sử dụng ID
+
+	log.Printf("Đang chờ selector '%s' xuất hiện...\n", usernameSelector)
+	if _, err := page.WaitForSelector(usernameSelector, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(10000)}); err != nil {
+		log.Fatalf("LỖI: Không tìm thấy '%s' trong 10s!", usernameSelector)
+	}
+	log.Printf("Đang chờ selector '%s' xuất hiện...\n", passwordSelector)
+	if _, err := page.WaitForSelector(passwordSelector, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(10000)}); err != nil {
+		log.Fatalf("LỖI: Không tìm thấy '%s' trong 10s!", passwordSelector)
+	}
+	// =============================================================
+
+	// BƯỚC 2: Điền thông tin
+	log.Println("Đang điền thông tin đăng nhập...")
+	if err := page.Fill(usernameSelector, MY_USERNAME); err != nil { // Timeout mặc định 30s
+		log.Fatalf("Không thể điền username (%s): %v", usernameSelector, err)
 	}
 
-	tokenElement := doc.Find("input[name='formToken']")
-	dynamicFormToken, exists := tokenElement.Attr("value")
-
-	if !exists || dynamicFormToken == "" {
-		log.Fatal("LỖI: Không tìm thấy 'formToken' trong HTML. Trang web có thể đã thay đổi.")
+	// === TĂNG TIMEOUT CHO FILL PASSWORD ===
+	log.Println("Đang điền password (timeout 60s)...")
+	if err := page.Fill(passwordSelector, MY_PASSWORD, playwright.PageFillOptions{
+		Timeout: playwright.Float(60000), // Tăng lên 60 giây
+	}); err != nil {
+		log.Fatalf("Không thể điền password (%s): %v", passwordSelector, err)
 	}
-	log.Printf("Đã tìm thấy formToken động: %s\n", dynamicFormToken)
+	// ===================================
 
-	// --- 6. BƯỚC 3: GỬI POST ĐỂ ĐĂNG NHẬP ---
-
-	// Xây dựng Form Data (payload) chính xác như trong DevTools
-	loginPayload := url.Values{
-		"validCheck":          {"valid"},
-		"source":              {"nav"},
-		"forceLogin":          {""},
-		"loginAction":         {"log-in"},
-		"formToken":           {dynamicFormToken}, // <-- Sử dụng token động
-		"findMe":              {""},
-		"username":            {MY_USERNAME}, // <-- Từ .env
-		"password":            {MY_PASSWORD}, // <-- Từ .env
-		"chkRememberPassword": {"1"},
-		"loginButton":         {"Sign in"},
+	// BƯỚC 3: Nhấp "Sign in"
+	log.Println("Đang nhấp nút đăng nhập...")
+	// Selector cho nút đăng nhập
+	loginButtonSelector := "button[name='loginButton']"
+	if err := page.Click(loginButtonSelector); err != nil {
+		log.Fatalf("Không thể nhấp nút login (%s): %v", loginButtonSelector, err)
 	}
 
-	log.Println("Đang gửi POST với payload (Form Data) để đăng nhập...")
-
-	responsePost, err := client.PostForm(loginURL, loginPayload)
-	if err != nil {
-		log.Fatalf("Lỗi khi gửi yêu cầu POST: %v", err)
-	}
-	defer responsePost.Body.Close()
-
-	// 302 (Chuyển hướng) cũng là dấu hiệu đăng nhập thành công
-	if responsePost.StatusCode != 200 && responsePost.StatusCode != 302 {
-		log.Fatalf("Đăng nhập thất bại, trạng thái: %s", responsePost.Status)
+	// Chờ trang tải sau khi nhấp đăng nhập
+	if err := page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State:   playwright.LoadStateNetworkidle,
+		Timeout: playwright.Float(60000),
+	}); err != nil {
+		log.Println("Lỗi khi chờ trang sau đăng nhập, nhưng vẫn tiếp tục kiểm tra...")
 	}
 
-	log.Println("✅ ĐĂNG NHẬP THÀNH CÔNG!")
+	log.Println("✅ ĐÃ ĐĂNG NHẬP THÀNH CÔNG (Giả định)!")
 
-	// --- 7. BƯỚC 4: KIỂM TRA PHIÊN (SESSION) THỦ CÔNG ---
-
-	// Lấy URL chúng ta vừa đăng nhập để lấy cookie
-	loginURL_parsed, _ := url.Parse(loginURL)
-	// Lấy tất cả cookie mà JAR đã lưu cho ha.com
-	loginCookies := jar.Cookies(loginURL_parsed)
-
-	if len(loginCookies) == 0 {
-		log.Fatal("LỖI: Đã đăng nhập nhưng không tìm thấy cookie nào để gửi đi.")
-	}
-
-	// Xây dựng chuỗi "Cookie: " thủ công
-	var cookieHeader strings.Builder
-	for i, cookie := range loginCookies {
-		if i > 0 {
-			cookieHeader.WriteString("; ")
-		}
-		// Thêm "tên=giá trị"
-		cookieHeader.WriteString(fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
-	}
-	log.Println("Đã xây dựng header Cookie thủ công để gửi đến tên miền phụ.")
-
+	// --- 4. KIỂM TRA TÊN MIỀN PHỤ ---
 	jewelryURL := "https://jewelry.ha.com/"
 	log.Printf("Đang kiểm tra duy trì đăng nhập tại: %s\n", jewelryURL)
 
-	// Tạo một yêu cầu (request) GET mới
-	req, err := http.NewRequest("GET", jewelryURL, nil)
-	if err != nil {
-		log.Fatalf("Lỗi khi tạo yêu cầu GET thủ công: %v", err)
+	if _, err := page.Goto(jewelryURL, playwright.PageGotoOptions{Timeout: playwright.Float(120000)}); err != nil {
+		log.Fatalf("Lỗi khi tải trang jewelry: %v", err)
 	}
 
-	// === BƯỚC QUAN TRỌNG: Thêm header Cookie thủ công ===
-	req.Header.Set("Cookie", cookieHeader.String())
-	// Thêm các header khác để trông giống trình duyệt
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/5.37.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
-	req.Header.Set("Referer", "https://www.ha.com/") // Giả vờ như ta đến từ trang chủ
-
-	// Gửi yêu cầu bằng client (vẫn dùng proxy và session IP)
-	responseJewelry, err := client.Do(req)
+	// Lấy nội dung trang
+	content, err := page.Content()
 	if err != nil {
-		log.Fatalf("Lỗi khi truy cập trang jewelry: %v", err)
+		log.Fatalf("Không thể lấy nội dung trang jewelry: %v", err)
 	}
-	defer responseJewelry.Body.Close()
+	os.WriteFile("jewelry_page_sb.html", []byte(content), 0644)
+	log.Println("Đã lưu nội dung vào 'jewelry_page_sb.html'")
 
-	// Đọc nội dung trang jewelry
-	body, err := io.ReadAll(responseJewelry.Body)
-	if err != nil {
-		log.Fatalf("Lỗi khi đọc nội dung trang jewelry: %v", err)
-	}
-
-	os.WriteFile("jewelry_page.html", body, 0644)
-	log.Println("Đã lưu nội dung vào 'jewelry_page.html'")
-
-	if strings.Contains(string(body), MY_USERNAME) {
-		log.Println("✅ THÀNH CÔNG! Đã duy trì đăng nhập trên tên miền phụ.")
+	// Kiểm tra bằng tên người dùng hoặc các chuỗi khác
+	if strings.Contains(content, MY_USERNAME) || strings.Contains(content, "Welcome") || strings.Contains(content, "Sign-Out") {
+		log.Println("✅✅✅ THÀNH CÔNG! Đã duy trì đăng nhập trên tên miền phụ.")
 	} else {
-		log.Println("❌ LỖI: KHÔNG duy trì đăng nhập. Hãy kiểm tra 'jewelry_page.html'.")
+		log.Println("❌ LỖI: KHÔNG duy trì đăng nhập. Hãy kiểm tra 'jewelry_page_sb.html'.")
 	}
 }
