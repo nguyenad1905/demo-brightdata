@@ -1,60 +1,44 @@
-# Bright Data Proxy Demo with Playwright
+# Bright Data Proxy Demo with Scrapling
 
-Web scraping demo using Playwright with Bright Data proxy for browser automation.
+Web scraping demo using Scrapling with Bright Data proxy and Camoufox browser for advanced anti-detection.
 
 ## Features
 
-- **Playwright Integration**: Browser automation with Chromium
+- **Scrapling Integration**: Advanced web scraping library with anti-detection
+- **Camoufox Browser**: Stealth browser designed to avoid detection
 - **Bright Data Proxy**: Residential proxy support
-- **Anti-Detection**: Advanced browser args to mimic real users
+- **Cloudflare Solver**: Auto-solve Cloudflare challenges
+- **Anti-Detection**: Advanced stealth settings to mimic real users
 - **Web Scraping**: Extract HTML content and take screenshots
 - **Environment Variables**: Secure credential management
 
-## Setup
+## Quick Start
 
-### 1. Create .env file
-Create `.env` file in root directory:
-
+### 1. Set environment variables
+**Windows (CMD):**
+```cmd
+set CUSTOMER_ID=brd-customer-YOUR_ACTUAL_CUSTOMER_ID
+set PROXY_PASSWORD=YOUR_ACTUAL_ZONE_PASSWORD
 ```
-CUSTOMER_ID=brd-customer-YOUR_ACTUAL_CUSTOMER_ID
-PROXY_PASSWORD=YOUR_ACTUAL_ZONE_PASSWORD
-```
-
-### 2. Install dependencies
-```bash
-go mod tidy
-go run github.com/playwright-community/playwright-go/cmd/playwright@v0.5200.1 install --with-deps
-```
-
-### 3. Run the program
-```bash
-go run main.go
-```
-
-## Environment Variables (Alternative)
-
-Instead of using `.env` file, you can set environment variables directly:
 
 **Windows (PowerShell):**
 ```powershell
 $env:CUSTOMER_ID="brd-customer-YOUR_ACTUAL_CUSTOMER_ID"
 $env:PROXY_PASSWORD="YOUR_ACTUAL_ZONE_PASSWORD"
-go run main.go
 ```
 
-**Windows (CMD):**
-```cmd
-set CUSTOMER_ID=brd-customer-YOUR_ACTUAL_CUSTOMER_ID
-set PROXY_PASSWORD=YOUR_ACTUAL_ZONE_PASSWORD
-go run main.go
-```
-
-**Linux/Mac:**
+### 2. Install dependencies
 ```bash
-export CUSTOMER_ID="brd-customer-YOUR_ACTUAL_CUSTOMER_ID"
-export PROXY_PASSWORD="YOUR_ACTUAL_ZONE_PASSWORD"
-go run main.go
+pip install camoufox python-dotenv
 ```
+
+### 3. Run the program
+```bash
+python main.py
+```
+
+**Target URL:** `https://www.ha.com/c/login.zx?source=nav`
+
 
 ## Output Files
 
@@ -63,9 +47,12 @@ go run main.go
 
 ## Anti-Detection Features
 
-The browser is configured with advanced arguments to avoid bot detection:
-- Disabled automation indicators
-- Realistic user agent
-- Standard window size (1920x1080)
-- Disabled unnecessary features
-- SSL certificate handling
+Scrapling with Camoufox provides advanced anti-detection capabilities:
+- **Camoufox Browser**: Stealth browser designed to avoid detection
+- **Cloudflare Solver**: Auto-solve Cloudflare challenges
+- **Stealth Mode**: Advanced stealth settings to mimic real users
+- **Proxy Support**: Bright Data residential proxy integration
+- **Human-like Behavior**: Simulated mouse movements and scrolling
+- **Realistic User Agent**: Chrome 120.0.0.0 user agent
+- **Standard Viewport**: 1920x1080 resolution
+- **Disabled Automation Indicators**: Removes webdriver properties

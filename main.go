@@ -1,289 +1,213 @@
+// Tên tệp: main.go
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/joho/godotenv"
 )
 
-// Session stores cookies and session info
-type Session struct {
-	Cookies   string
-	SessionID string
+// createSessionID tạo một ID ngẫu nhiên (10 ký tự)
+// Việc này ra lệnh cho Web Unlocker sử dụng cùng một IP (IP cố định) cho tất cả các yêu cầu
+func createSessionID() string {
+	rand.Seed(time.Now().UnixNano())
+	chars := []rune("abcdefghijklmnopqrstuvwxyz0123456789")
+	b := make([]rune, 10)
+	for i := range b {
+		b[i] = chars[rand.Intn(len(chars))]
+	}
+	return string(b)
 }
 
 func main() {
-	// Load .env file
+	log.Println("--- Bắt đầu quy trình đăng nhập không trình duyệt ---")
+
+	// --- 1. TẢI BIẾN MÔI TRƯỜNG TỪ TỆP .ENV ---
 	err := godotenv.Load()
 	if err != nil {
-		log.Printf("Failed to load .env: %v", err)
+		log.Println("Không tìm thấy tệp .env, đang sử dụng biến môi trường hệ thống.")
 	}
 
-	// Get Bright Data credentials
-	brightDataAPIKey := os.Getenv("BRIGHT_DATA_API_KEY")
-	zoneName := os.Getenv("ZONE_NAME")
-	if zoneName == "" {
-		zoneName = "web_unlocker1"
+	// --- 2. LẤY THÔNG TIN XÁC THỰC TỪ ENV ---
+	CUSTOMER_ID := os.Getenv("BRD_CUSTOMER_ID")
+	PROXY_PASSWORD := os.Getenv("BRD_PASSWORD")
+	ZONE_NAME := os.Getenv("BRD_ZONE_NAME")
+	PROXY_PORT := os.Getenv("BRD_PROXY_PORT")
+	MY_USERNAME := os.Getenv("APP_USERNAME")
+	MY_PASSWORD := os.Getenv("APP_PASSWORD")
+
+	// Kiểm tra xem tất cả các biến đã được đặt chưa
+	if CUSTOMER_ID == "" || PROXY_PASSWORD == "" || MY_USERNAME == "" || MY_PASSWORD == "" || ZONE_NAME == "" || PROXY_PORT == "" {
+		log.Fatal("Lỗi: Một trong các biến môi trường (BRD_CUSTOMER_ID, BRD_PASSWORD, BRD_ZONE_NAME, BRD_PROXY_PORT, APP_USERNAME, APP_PASSWORD) chưa được đặt.")
 	}
 
-	if brightDataAPIKey == "" {
-		log.Fatal("Please set BRIGHT_DATA_API_KEY environment variable")
+	// --- 3. TẠO HTTP CLIENT (PHIÊN LÀM VIỆC) ---
+
+	// Jar vẫn cần thiết để TỰ ĐỘNG nhận và lưu cookie từ Bước 5 (POST)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		log.Fatalf("Lỗi khi tạo cookie jar: %v", err)
 	}
 
-	fmt.Println("=== Bright Data Web Unlocker Login ===")
+	sessionID := createSessionID()
+	log.Printf("Đang sử dụng Session ID cho IP cố định: %s\n", sessionID)
 
-	// Target URL to access
+	// Xây dựng chuỗi username, bao gồm cả session cố định và quốc gia
+	proxyUser := fmt.Sprintf("%s-zone-%s-session-%s-brd-country-us", CUSTOMER_ID, ZONE_NAME, sessionID)
+	proxyHost := "brd.superproxy.io"
+
+	// Sử dụng PROXY_PORT từ .env
+	proxyString := fmt.Sprintf("http://%s:%s@%s:%s", proxyUser, PROXY_PASSWORD, proxyHost, PROXY_PORT)
+
+	proxyURL, err := url.Parse(proxyString)
+	if err != nil {
+		log.Fatalf("Lỗi khi phân tích URL proxy: %v", err)
+	}
+
+	// Cấu hình Transport để dùng proxy và bỏ qua xác minh SSL
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	// Tạo Client (phiên làm việc) cuối cùng
+	client := &http.Client{
+		Transport: transport,
+		Jar:       jar,               // Dùng để TỰ ĐỘNG LƯU cookie
+		Timeout:   120 * time.Second, // Đặt thời gian chờ 2 phút
+	}
+
+	// --- 4. BƯỚC 1: GET ĐỂ LẤY TOKEN ---
 	loginURL := "https://www.ha.com/c/login.zx"
-	loginPageURL := loginURL + "?source=nav"
+	log.Printf("Đang gửi GET tới %s (Web Unlocker sẽ giải CAPTCHA)...\n", loginURL)
 
-	// Initialize session with a unique session_id
-	// This will be added to the zone name as "-session-<session_id>"
-	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
-	session := &Session{
-		SessionID: sessionID,
-	}
-	fmt.Printf("Initialized session_id: %s\n", sessionID)
-
-	// Step 1: Use Web Unlocker API to get login page HTML
-	fmt.Printf("Step 1: Getting login page from %s...\n", loginPageURL)
-	unlockedHTML, err := requestWebUnlocker(brightDataAPIKey, zoneName, loginPageURL, session)
+	responseGet, err := client.Get(loginURL)
 	if err != nil {
-		log.Fatalf("Failed to unlock URL: %v", err)
+		log.Fatalf("Lỗi khi gửi yêu cầu GET: %v", err)
 	}
-	fmt.Printf("✓ Successfully got login page. Content size: %d bytes\n", len(unlockedHTML))
+	defer responseGet.Body.Close()
 
-	// Step 2: Extract formToken from HTML
-	formToken := extractFormToken(unlockedHTML)
-	if formToken == "" {
-		log.Fatal("Failed to extract formToken from login page")
+	if responseGet.StatusCode != 200 {
+		log.Fatalf("Yêu cầu GET thất bại, trạng thái: %s", responseGet.Status)
 	}
-	fmt.Printf("✓ Extracted formToken: %s\n", formToken)
 
-	// Step 3: Submit login form via Web Unlocker POST
-	fmt.Println("\nStep 2: Submitting login form...")
-	loginResponse, err := submitLoginForm(brightDataAPIKey, zoneName, loginURL, formToken, session)
+	// --- 5. BƯỚC 2: PHÂN TÍCH TOKEN ---
+	log.Println("Đang phân tích HTML để tìm 'formToken'...")
+
+	doc, err := goquery.NewDocumentFromReader(responseGet.Body)
 	if err != nil {
-		log.Fatalf("Failed to submit login: %v", err)
+		log.Fatalf("Lỗi khi phân tích HTML: %v", err)
 	}
-	fmt.Printf("✓ Login response received. Content size: %d bytes\n", len(loginResponse))
 
-	// Print session cookies after login
-	fmt.Printf("✓ Session Cookies: %s\n", session.Cookies)
+	tokenElement := doc.Find("input[name='formToken']")
+	dynamicFormToken, exists := tokenElement.Attr("value")
 
-	// Save response to file
-	outputFile := "login_response.html"
-	err = os.WriteFile(outputFile, []byte(loginResponse), 0644)
+	if !exists || dynamicFormToken == "" {
+		log.Fatal("LỖI: Không tìm thấy 'formToken' trong HTML. Trang web có thể đã thay đổi.")
+	}
+	log.Printf("Đã tìm thấy formToken động: %s\n", dynamicFormToken)
+
+	// --- 6. BƯỚC 3: GỬI POST ĐỂ ĐĂNG NHẬP ---
+
+	// Xây dựng Form Data (payload) chính xác như trong DevTools
+	loginPayload := url.Values{
+		"validCheck":          {"valid"},
+		"source":              {"nav"},
+		"forceLogin":          {""},
+		"loginAction":         {"log-in"},
+		"formToken":           {dynamicFormToken}, // <-- Sử dụng token động
+		"findMe":              {""},
+		"username":            {MY_USERNAME}, // <-- Từ .env
+		"password":            {MY_PASSWORD}, // <-- Từ .env
+		"chkRememberPassword": {"1"},
+		"loginButton":         {"Sign in"},
+	}
+
+	log.Println("Đang gửi POST với payload (Form Data) để đăng nhập...")
+
+	responsePost, err := client.PostForm(loginURL, loginPayload)
 	if err != nil {
-		log.Fatalf("Failed to save file: %v", err)
+		log.Fatalf("Lỗi khi gửi yêu cầu POST: %v", err)
 	}
-	fmt.Printf("✓ Login response saved to: %s\n", outputFile)
+	defer responsePost.Body.Close()
 
-	// Step 3: Access jewelry.ha.com after login
-	fmt.Println("\nStep 3: Accessing jewelry.ha.com...")
-	jewelryURL := "https://jewelry.ha.com/"
-	jewelryHTML, err := requestWebUnlocker(brightDataAPIKey, zoneName, jewelryURL, session)
-	if err != nil {
-		log.Fatalf("Failed to access jewelry page: %v", err)
-	}
-	fmt.Printf("✓ Successfully accessed jewelry page. Content size: %d bytes\n", len(jewelryHTML))
-
-	// Save jewelry page to file
-	jewelryFile := "jewelry_page.html"
-	err = os.WriteFile(jewelryFile, []byte(jewelryHTML), 0644)
-	if err != nil {
-		log.Fatalf("Failed to save file: %v", err)
-	}
-	fmt.Printf("✓ Jewelry page saved to: %s\n", jewelryFile)
-
-	fmt.Println("\n=== All steps completed ===")
-}
-
-// extractFormToken extracts the formToken from HTML
-func extractFormToken(html string) string {
-	// Look for <input type="hidden" name="formToken" value="...">
-	re := regexp.MustCompile(`<input[^>]+name="formToken"[^>]+value="([^"]+)"`)
-	matches := re.FindStringSubmatch(html)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-	return ""
-}
-
-// submitLoginForm submits login form via Web Unlocker POST and extracts cookies
-func submitLoginForm(apiKey, zone, loginURL, formToken string, session *Session) (string, error) {
-	// Create URL-encoded form body as a string
-	formBody := fmt.Sprintf("validCheck=valid&source=nav&forceLogin=&loginAction=log-in&formToken=%s&findMe=&username=nguyenad1905c1&password=@!Qwerty3145&chkRememberPassword=1&loginButton=Sign+In",
-		formToken)
-
-	// Build headers with cookies if available
-	headersJSON := `"Content-Type": "application/x-www-form-urlencoded"`
-	if session.Cookies != "" {
-		escapedCookies := strings.ReplaceAll(session.Cookies, `\`, `\\`)
-		headersJSON = fmt.Sprintf(`"Content-Type": "application/x-www-form-urlencoded",
-            "Cookie": %q`, escapedCookies)
-		fmt.Printf("Login with cookies: %s...\n", session.Cookies[:100])
+	// 302 (Chuyển hướng) cũng là dấu hiệu đăng nhập thành công
+	if responsePost.StatusCode != 200 && responsePost.StatusCode != 302 {
+		log.Fatalf("Đăng nhập thất bại, trạng thái: %s", responsePost.Status)
 	}
 
-	// Create POST request payload for Web Unlocker
-	payloadStr := fmt.Sprintf(`{
-        "zone": "%s",
-        "url": "%s",
-        "format": "raw",
-        "method": "POST",
-        "session": "%s",
-        "body": %q,
-        "headers": {
-            %s
-        }
-    }`, zone, loginURL, session.SessionID, formBody, headersJSON)
+	log.Println("✅ ĐĂNG NHẬP THÀNH CÔNG!")
 
-	fmt.Printf("Using session_id: %s\n", session.SessionID)
+	// --- 7. BƯỚC 4: KIỂM TRA PHIÊN (SESSION) THỦ CÔNG ---
 
-	fmt.Printf("POST Request to: %s\n", loginURL)
-	fmt.Printf("Form Data: username=nguyenad1905c1, formToken=%s...\n", formToken[:8])
+	// Lấy URL chúng ta vừa đăng nhập để lấy cookie
+	loginURL_parsed, _ := url.Parse(loginURL)
+	// Lấy tất cả cookie mà JAR đã lưu cho ha.com
+	loginCookies := jar.Cookies(loginURL_parsed)
 
-	payload := strings.NewReader(payloadStr)
-
-	req, err := http.NewRequest("POST", "https://api.brightdata.com/request", payload)
-	if err != nil {
-		return "", err
+	if len(loginCookies) == 0 {
+		log.Fatal("LỖI: Đã đăng nhập nhưng không tìm thấy cookie nào để gửi đi.")
 	}
 
-	req.Header.Add("Authorization", "Bearer "+apiKey)
-	req.Header.Add("Content-Type", "application/json")
-
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-	}
-
-	res, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer res.Body.Close()
-
-	fmt.Printf("Response Status: %d\n", res.StatusCode)
-
-	// Extract cookies from response headers
-	extractCookiesFromResponse(res, session)
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", err
-	}
-
-	fmt.Printf("Response Body Length: %d bytes\n", len(body))
-
-	if res.StatusCode != http.StatusOK {
-		fmt.Printf("Response Body: %s\n", string(body))
-		return "", fmt.Errorf("API error: %d - %s", res.StatusCode, string(body))
-	}
-
-	// Log first 500 chars if content is large
-	if len(body) > 0 && len(body) < 1000 {
-		fmt.Printf("Response Body: %s\n", string(body))
-	} else if len(body) > 0 {
-		fmt.Printf("Response Preview (first 500 chars): %s...\n", string(body[:500]))
-	}
-
-	return string(body), nil
-}
-
-// requestWebUnlocker makes request to Bright Data Web Unlocker API with session support
-func requestWebUnlocker(apiKey, zone, targetURL string, session *Session) (string, error) {
-	url := "https://api.brightdata.com/request"
-
-	// Build payload with cookies if available
-	payloadStr := fmt.Sprintf(`{
-        "zone": "%s",
-        "url": "%s",
-        "format": "raw",
-        "method": "GET",
-        "session": "%s"
-    }`, zone, targetURL, session.SessionID)
-
-	// Add cookies to headers if available
-	if session.Cookies != "" {
-		// Escape backslashes in cookies for JSON
-		escapedCookies := strings.ReplaceAll(session.Cookies, `\`, `\\`)
-		payloadStr = fmt.Sprintf(`{
-        "zone": "%s",
-        "url": "%s",
-        "format": "raw",
-        "method": "GET",
-        "session": "%s",
-        "headers": {
-            "Cookie": %q
-        }
-    }`, zone, targetURL, session.SessionID, escapedCookies)
-		fmt.Printf("Sending cookies: %s\n", session.Cookies[:100]+"...")
-	}
-
-	fmt.Printf("Using session_id: %s\n", session.SessionID)
-
-	payload := strings.NewReader(payloadStr)
-
-	req, err := http.NewRequest("POST", url, payload)
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Add("Authorization", "Bearer "+apiKey)
-	req.Header.Add("Content-Type", "application/json")
-
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-	}
-
-	res, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer res.Body.Close()
-
-	// Log response status
-	fmt.Printf("Response Status: %d\n", res.StatusCode)
-
-	// Extract cookies from response headers
-	extractCookiesFromResponse(res, session)
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", err
-	}
-
-	fmt.Printf("Response Body Length: %d bytes\n", len(body))
-
-	if res.StatusCode != http.StatusOK {
-		fmt.Printf("Response Body: %s\n", string(body))
-		return "", fmt.Errorf("API error: %d - %s", res.StatusCode, string(body))
-	}
-
-	// Log first 500 chars if content is large
-	if len(body) > 0 && len(body) < 1000 {
-		fmt.Printf("Response Body: %s\n", string(body))
-	} else if len(body) > 0 {
-		fmt.Printf("Response Body (first 500 chars): %s...\n", string(body[:500]))
-	}
-
-	return string(body), nil
-}
-
-// extractCookiesFromResponse extracts cookies from response headers
-func extractCookiesFromResponse(res *http.Response, session *Session) {
-	cookies := res.Cookies()
-	if len(cookies) > 0 {
-		var cookieStrings []string
-		for _, cookie := range cookies {
-			cookieStrings = append(cookieStrings, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
+	// Xây dựng chuỗi "Cookie: " thủ công
+	var cookieHeader strings.Builder
+	for i, cookie := range loginCookies {
+		if i > 0 {
+			cookieHeader.WriteString("; ")
 		}
-		session.Cookies = strings.Join(cookieStrings, "; ")
+		// Thêm "tên=giá trị"
+		cookieHeader.WriteString(fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
+	}
+	log.Println("Đã xây dựng header Cookie thủ công để gửi đến tên miền phụ.")
+
+	jewelryURL := "https://jewelry.ha.com/"
+	log.Printf("Đang kiểm tra duy trì đăng nhập tại: %s\n", jewelryURL)
+
+	// Tạo một yêu cầu (request) GET mới
+	req, err := http.NewRequest("GET", jewelryURL, nil)
+	if err != nil {
+		log.Fatalf("Lỗi khi tạo yêu cầu GET thủ công: %v", err)
+	}
+
+	// === BƯỚC QUAN TRỌNG: Thêm header Cookie thủ công ===
+	req.Header.Set("Cookie", cookieHeader.String())
+	// Thêm các header khác để trông giống trình duyệt
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/5.37.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Referer", "https://www.ha.com/") // Giả vờ như ta đến từ trang chủ
+
+	// Gửi yêu cầu bằng client (vẫn dùng proxy và session IP)
+	responseJewelry, err := client.Do(req)
+	if err != nil {
+		log.Fatalf("Lỗi khi truy cập trang jewelry: %v", err)
+	}
+	defer responseJewelry.Body.Close()
+
+	// Đọc nội dung trang jewelry
+	body, err := io.ReadAll(responseJewelry.Body)
+	if err != nil {
+		log.Fatalf("Lỗi khi đọc nội dung trang jewelry: %v", err)
+	}
+
+	os.WriteFile("jewelry_page.html", body, 0644)
+	log.Println("Đã lưu nội dung vào 'jewelry_page.html'")
+
+	if strings.Contains(string(body), MY_USERNAME) {
+		log.Println("✅ THÀNH CÔNG! Đã duy trì đăng nhập trên tên miền phụ.")
+	} else {
+		log.Println("❌ LỖI: KHÔNG duy trì đăng nhập. Hãy kiểm tra 'jewelry_page.html'.")
 	}
 }
