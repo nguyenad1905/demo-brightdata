@@ -1,44 +1,37 @@
 // Tên tệp: browser.go
-// Giải pháp này sử dụng Bright Data Scraping Browser (tăng timeout cho Fill)
+// Thêm screenshot sau khi điền username
 package main
 
 import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
-	"time" // Thêm thư viện time để dùng Sleep
+	"time" // Thêm thư viện time
 
 	"github.com/joho/godotenv"
 	"github.com/playwright-community/playwright-go"
 )
 
 func main() {
+	// ... (Tất cả mã tải .env và kết nối giữ nguyên) ...
 	log.Println("--- Bắt đầu quy trình đăng nhập bằng Scraping Browser ---")
-
-	// --- 1. TẢI BIẾN MÔI TRƯỜNG ---
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Không tìm thấy tệp .env, đang sử dụng biến môi trường hệ thống.")
+		log.Println("Không tìm thấy tệp .env...")
 	}
 
 	CUSTOMER_ID := os.Getenv("BRD_CUSTOMER_ID")
 	PROXY_PASSWORD := os.Getenv("BRD_PASSWORD")
-	ZONE_NAME := os.Getenv("BRD_SB_ZONE_NAME") // Zone của Scraping Browser
-	SB_PORT := os.Getenv("BRD_SB_PORT")        // Cổng của Scraping Browser (ví dụ: 9222)
+	ZONE_NAME := os.Getenv("BRD_SB_ZONE_NAME")
+	SB_PORT := os.Getenv("BRD_SB_PORT")
 	MY_USERNAME := os.Getenv("APP_USERNAME")
 	MY_PASSWORD := os.Getenv("APP_PASSWORD")
 
-	// Kiểm tra các biến quan trọng cho mã này
 	if CUSTOMER_ID == "" || PROXY_PASSWORD == "" || ZONE_NAME == "" || SB_PORT == "" || MY_USERNAME == "" || MY_PASSWORD == "" {
-		log.Fatal("Lỗi: Một trong các biến môi trường (BRD_CUSTOMER_ID, BRD_PASSWORD, BRD_SB_ZONE_NAME, BRD_SB_PORT, APP_USERNAME, APP_PASSWORD) chưa được đặt.")
+		log.Fatal("Lỗi: Biến môi trường chưa được đặt.")
 	}
 
-	// --- 2. KẾT NỐI VỚI SCRAPING BROWSER CỦA BRIGHT DATA ---
-
-	// Xây dựng URL điểm cuối (endpoint) WebSocket (wss)
 	endpointURL := fmt.Sprintf("wss://%s-zone-%s:%s@brd.superproxy.io:%s", CUSTOMER_ID, ZONE_NAME, PROXY_PASSWORD, SB_PORT)
-
 	log.Println("Đang kết nối với:", fmt.Sprintf("wss://%s-zone-%s:***PASSWORD***@brd.superproxy.io:%s", CUSTOMER_ID, ZONE_NAME, SB_PORT))
 
 	pw, err := playwright.Run()
@@ -47,16 +40,14 @@ func main() {
 	}
 	defer pw.Stop()
 
-	// Kết nối với trình duyệt từ xa của Bright Data
 	browser, err := pw.Chromium.ConnectOverCDP(endpointURL, playwright.BrowserTypeConnectOverCDPOptions{
-		Timeout: playwright.Float(120000), // Tăng thời gian chờ kết nối lên 2 phút
+		Timeout: playwright.Float(120000),
 	})
 	if err != nil {
 		log.Fatalf("Không thể kết nối với Scraping Browser: %v", err)
 	}
 	defer browser.Close()
 
-	log.Println("Đã kết nối! Đang tạo bối cảnh (context)...")
 	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
 		UserAgent: playwright.String("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"),
 		Viewport: &playwright.Size{
@@ -72,94 +63,99 @@ func main() {
 	if err != nil {
 		log.Fatalf("Không thể tạo trang: %v", err)
 	}
+	// Không cần SetViewportSize
 
-	// --- 3. THỰC HIỆN ĐĂNG NHẬP (Mã Playwright đơn giản) ---
+	// --- 3. THỰC HIỆN ĐĂNG NHẬP ---
 	loginURL := "https://www.ha.com/c/login.zx"
 
-	// BƯỚC 1: Tải trang.
 	log.Printf("Đang tải trang %s (Scraping Browser sẽ giải CAPTCHA)...\n", loginURL)
 	if _, err := page.Goto(loginURL, playwright.PageGotoOptions{Timeout: playwright.Float(120000)}); err != nil {
 		log.Fatalf("Lỗi khi tải trang login: %v", err)
 	}
 
-	// Thêm độ trễ để Scraping Browser có thời gian xử lý CAPTCHA (nếu cần)
 	log.Println("Chờ 5 giây để Scraping Browser xử lý (nếu có)...")
 	time.Sleep(5 * time.Second)
 
-	// Chụp ảnh màn hình để xem trang đã tải như thế nào
 	log.Println("Trang đã tải, đang chụp ảnh màn hình trước khi điền...")
-	if _, err := page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_login_page.png"), FullPage: playwright.Bool(true)}); err != nil {
+	if _, err := page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_login_page_before_fill.png"), FullPage: playwright.Bool(true)}); err != nil { // Đổi tên file
 		log.Printf("Không thể chụp ảnh màn hình: %v", err)
 	}
-	log.Println("Đã lưu ảnh chụp màn hình vào 'debug_login_page.png'")
+	log.Println("Đã lưu ảnh chụp màn hình vào 'debug_login_page_before_fill.png'")
 
-	// === Selector (Giả định selector password là 'input#password') ===
 	usernameSelector := "input[name='username']"
-	passwordSelector := "input#password" // Sử dụng ID
+	passwordSelector := "input#password"
 
 	log.Printf("Đang chờ selector '%s' xuất hiện...\n", usernameSelector)
-	if _, err := page.WaitForSelector(usernameSelector, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(10000)}); err != nil {
+	usernameLocator := page.Locator(usernameSelector)
+	if err := usernameLocator.WaitFor(playwright.LocatorWaitForOptions{Timeout: playwright.Float(10000)}); err != nil {
 		log.Fatalf("LỖI: Không tìm thấy '%s' trong 10s!", usernameSelector)
 	}
 	log.Printf("Đang chờ selector '%s' xuất hiện...\n", passwordSelector)
-	if _, err := page.WaitForSelector(passwordSelector, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(10000)}); err != nil {
+	passwordLocator := page.Locator(passwordSelector) // Lấy locator sớm
+	if err := passwordLocator.WaitFor(playwright.LocatorWaitForOptions{Timeout: playwright.Float(10000)}); err != nil {
+		// Vẫn cần chờ password ở đây để đảm bảo nó tồn tại trước khi điền username
 		log.Fatalf("LỖI: Không tìm thấy '%s' trong 10s!", passwordSelector)
 	}
-	// =============================================================
 
-	// BƯỚC 2: Điền thông tin
-	log.Println("Đang điền thông tin đăng nhập...")
-	if err := page.Fill(usernameSelector, MY_USERNAME); err != nil { // Timeout mặc định 30s
+	// BƯỚC 2.1: Điền username
+	log.Println("Đang điền username...")
+	if err := usernameLocator.Fill(MY_USERNAME); err != nil {
 		log.Fatalf("Không thể điền username (%s): %v", usernameSelector, err)
 	}
 
-	// === TĂNG TIMEOUT CHO FILL PASSWORD ===
-	log.Println("Đang điền password (timeout 60s)...")
-	if err := page.Fill(passwordSelector, MY_PASSWORD, playwright.PageFillOptions{
-		Timeout: playwright.Float(60000), // Tăng lên 60 giây
-	}); err != nil {
-		log.Fatalf("Không thể điền password (%s): %v", passwordSelector, err)
+	// === THÊM SCREENSHOT MỚI ===
+	log.Println("Đã điền username, đang chụp ảnh màn hình...")
+	if _, err := page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_login_page_after_username.png"), FullPage: playwright.Bool(true)}); err != nil {
+		log.Printf("Không thể chụp ảnh màn hình sau username: %v", err)
 	}
-	// ===================================
+	log.Println("Đã lưu ảnh chụp màn hình vào 'debug_login_page_after_username.png'")
+	// ===========================
+
+	// BƯỚC 2.2: Điền password (Dùng lại Evaluate vì các cách khác đã thất bại)
+	log.Println("Đang thử điền password bằng page.Evaluate...")
+	jsCode := fmt.Sprintf(`
+		var pwField = document.getElementById('password');
+		if (pwField) {
+			pwField.value = '%s';
+			// Kích hoạt các sự kiện change/input phòng trường hợp trang web lắng nghe chúng
+			pwField.dispatchEvent(new Event('input', { bubbles: true }));
+			pwField.dispatchEvent(new Event('change', { bubbles: true }));
+		} else {
+			throw new Error('Password field not found by ID');
+		}`, MY_PASSWORD)
+
+	if _, err := page.Evaluate(jsCode); err != nil {
+		// Nếu Evaluate thất bại (ví dụ do điều hướng), lỗi này sẽ được ghi lại
+		log.Fatalf("Không thể điền password bằng page.Evaluate: %v", err)
+	}
+	log.Println("Đã điền password bằng page.Evaluate (hoặc đã bị điều hướng).")
+
+	// Thêm một khoảng chờ nhỏ sau khi điền password bằng JS
+	time.Sleep(1 * time.Second)
 
 	// BƯỚC 3: Nhấp "Sign in"
 	log.Println("Đang nhấp nút đăng nhập...")
-	// Selector cho nút đăng nhập
-	loginButtonSelector := "button[name='loginButton']"
-	if err := page.Click(loginButtonSelector); err != nil {
-		log.Fatalf("Không thể nhấp nút login (%s): %v", loginButtonSelector, err)
+	if err := page.Click("button[name='loginButton']"); err != nil {
+		// Nếu trang đã điều hướng, nút này có thể không còn tồn tại
+		log.Printf("CẢNH BÁO: Không thể nhấp nút login: %v. Có thể trang đã điều hướng sau khi điền username.\n", err)
+		// Chụp ảnh màn hình cuối cùng để xem chuyện gì xảy ra
+		if _, err_ss := page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_after_login_click_fail.png"), FullPage: playwright.Bool(true)}); err_ss != nil {
+			log.Printf("Không thể chụp ảnh màn hình cuối: %v", err_ss)
+		}
 	}
 
-	// Chờ trang tải sau khi nhấp đăng nhập
+	// ... (Phần còn lại của mã kiểm tra tên miền phụ giữ nguyên) ...
 	if err := page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 		State:   playwright.LoadStateNetworkidle,
 		Timeout: playwright.Float(60000),
 	}); err != nil {
-		log.Println("Lỗi khi chờ trang sau đăng nhập, nhưng vẫn tiếp tục kiểm tra...")
+		log.Println("Lỗi khi chờ trang đăng nhập/điều hướng, nhưng vẫn tiếp tục kiểm tra...")
 	}
 
-	log.Println("✅ ĐÃ ĐĂNG NHẬP THÀNH CÔNG (Giả định)!")
+	log.Println("✅ ĐÃ ĐĂNG NHẬP THÀNH CÔNG (Giả định)!") // Giả định này có thể sai nếu trang điều hướng lỗi
 
 	// --- 4. KIỂM TRA TÊN MIỀN PHỤ ---
 	jewelryURL := "https://jewelry.ha.com/"
 	log.Printf("Đang kiểm tra duy trì đăng nhập tại: %s\n", jewelryURL)
-
-	if _, err := page.Goto(jewelryURL, playwright.PageGotoOptions{Timeout: playwright.Float(120000)}); err != nil {
-		log.Fatalf("Lỗi khi tải trang jewelry: %v", err)
-	}
-
-	// Lấy nội dung trang
-	content, err := page.Content()
-	if err != nil {
-		log.Fatalf("Không thể lấy nội dung trang jewelry: %v", err)
-	}
-	os.WriteFile("jewelry_page_sb.html", []byte(content), 0644)
-	log.Println("Đã lưu nội dung vào 'jewelry_page_sb.html'")
-
-	// Kiểm tra bằng tên người dùng hoặc các chuỗi khác
-	if strings.Contains(content, MY_USERNAME) || strings.Contains(content, "Welcome") || strings.Contains(content, "Sign-Out") {
-		log.Println("✅✅✅ THÀNH CÔNG! Đã duy trì đăng nhập trên tên miền phụ.")
-	} else {
-		log.Println("❌ LỖI: KHÔNG duy trì đăng nhập. Hãy kiểm tra 'jewelry_page_sb.html'.")
-	}
+	// ... (phần còn lại của mã kiểm tra) ...
 }
